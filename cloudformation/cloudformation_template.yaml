@@ -1,0 +1,228 @@
+
+Resources:
+  # RDS MySQL Database
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: mysql
+      MasterUsername: admin
+      MasterUserPassword: Qpmz0921
+      AllocatedStorage: 20
+      DBInstanceClass: db.t2.micro
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: LambdaFullAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'lambda:*'
+                Resource: '*'
+      
+  # Search Lambda Function
+  SearchLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: searchLambdaFunction.handler
+      Role: 
+        Fn::GetAtt: [LambdaExecutionRole, Arn]
+      FunctionName: SearchLambdaFunction
+      Code:
+        S3Bucket: idemiareservationsbucket
+        S3Key: searchLambdaFunction.zip
+      Runtime: nodejs14.x
+      Environment:
+        Variables:
+          RDS_HOST: !Ref RDSInstance
+          
+  # CRUD Lambda Function
+  CRUDLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: crudLambdaFunction.handler
+      Role: 
+        Fn::GetAtt: [LambdaExecutionRole, Arn]
+      FunctionName: CRUDLambdaFunction
+      Code:
+        S3Bucket: idemiareservationsbucket
+        S3Key: crudLambdaFunction.zip
+      Runtime: nodejs14.x
+      Environment:
+        Variables:
+          RDS_HOST: !Ref RDSInstance
+
+  # New Lambda function to trigger Step Functions
+  TriggerStepFunctionLambda:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Handler: TriggerStepFunctionLambda.handler
+      Role: "arn:aws:iam::741935926066:role/AWSIdemiaLambdaExecRole"
+      FunctionName: TriggerStepFunctionLambda
+      Code: 
+        S3Bucket: idemiareservationsbucket
+        S3Key: TriggerStepFunctionLambda.zip
+      Runtime: nodejs14.x
+      Environment: 
+        Variables: 
+          STATE_MACHINE_ARN: !Ref ReservationStateMachine
+
+  # IAM Role for Lambda to have permissions to start Step Functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaStepFunctionsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref ReservationStateMachine
+
+  StepFunctionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaStepFunctionsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref ReservationStateMachine
+
+  # API Gateway
+  NewAPIGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties: 
+      Name: "NewReservationsAPI"
+      Description: "API for Reservations"
+      FailOnWarnings: "true"
+
+  # API Gateway resource for the new Lambda function
+  TriggerStepFunctionResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - "NewAPIGateway"
+        - "RootResourceId"
+      PathPart: trigger-step-function
+      RestApiId: !Ref NewAPIGateway
+      
+  # API Gateway method to invoke the new Lambda function
+  TriggerStepFunctionMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties: 
+      AuthorizationType: NONE
+      HttpMethod: POST
+      ResourceId: !Ref TriggerStepFunctionResource
+      RestApiId: !Ref NewAPIGateway
+      Integration: 
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: 
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TriggerStepFunctionLambda.Arn}/invocations
+
+  # Permission for API Gateway to invoke the new Lambda function
+  TriggerStepFunctionLambdaApiGatewayInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TriggerStepFunctionLambda
+      Principal: apigateway.amazonaws.com
+
+  # Step Functions
+  ReservationStateMachine:
+    Type: "AWS::StepFunctions::StateMachine"
+    Properties:
+      DefinitionString: 
+        !Sub |
+          {
+            "Comment": "A Hello World example of the Amazon States Language using a Pass state",
+            "StartAt": "SearchOrCRUD",
+            "States": {
+              "SearchOrCRUD": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.action",
+                    "StringEquals": "search",
+                    "Next": "SearchLambdaFunctionPlaceholder"
+                  },
+                  {
+                    "Variable": "$.action",
+                    "StringEquals": "crud",
+                    "Next": "CRUDLambdaFunctionPlaceholder"
+                  }
+                ],
+                "Default": "SearchLambdaFunctionPlaceholder"
+              },
+              "SearchLambdaFunctionPlaceholder": {
+                "Type": "Pass",
+                "Result": "Nothing to do yet",
+                "End": true
+              },
+              "CRUDLambdaFunctionPlaceholder": {
+                "Type": "Pass",
+                "Result": "Nothing to do yet",
+                "End": true
+              }
+            }
+          }
+      RoleArn: arn:aws:iam::741935926066:role/AWSStepFunctionsAccess
+      StateMachineName: "ReservationStateMachine"
+
+  # Custom Resource to Update State Machine
+  UpdateStateMachine:
+    Type: "Custom::UpdateStateMachine"
+    Properties:
+      ServiceToken: !GetAtt UpdateStateMachineFunction.Arn
+      StateMachineArn: !Ref ReservationStateMachine
+
+  # Lambda Function for Custom Resource
+  UpdateStateMachineFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: updateStateMachine.handler
+      Role: 
+        Fn::GetAtt: [LambdaExecutionRole, Arn]
+      FunctionName: UpdateStateMachineFunction
+      Code:
+        S3Bucket: idemiareservationsbucket
+        S3Key: updateStateMachine.zip
+      Runtime: nodejs14.x
+      Timeout: 30
